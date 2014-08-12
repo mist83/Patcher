@@ -6,36 +6,37 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Resources;
+using System.Text;
 using System.Windows;
 
 namespace Patcher
 {
     public static class Utility
     {
-        public static void CompileExecutable(string outputAssembly, string rootDirectory, string targetDirectory, params string[] resourceFiles)
+        public static void CompileExecutable(PatchOptions options)
         {
             string embeddedResourceFile = Path.GetTempFileName();
 
             try
             {
-                var filesWithoutDirectories = resourceFiles.Select(x => new FileInfo(x).Name).ToArray();
+                var filesWithoutDirectories = options.Files.Select(x => new FileInfo(x).Name).ToArray();
 
                 var compilerParameters = new CompilerParameters
                 {
                     GenerateExecutable = true,
-                    OutputAssembly = outputAssembly,
-                    CompilerOptions = "/target:winexe",
+                    OutputAssembly = options.OutputAssembly,
+                    CompilerOptions = "/target:winexe", // Make it a WPF app as opposed to a console app
                 };
 
                 var input = new Dictionary<string, byte[]>();
                 using (ResourceWriter rw = new ResourceWriter(embeddedResourceFile))
                 {
-                    foreach (var resourceFile in resourceFiles)
+                    foreach (var resourceFile in options.Files)
                     {
                         // Trim off the redundant data
-                        string pathedResourceFile = new FileInfo(resourceFile).FullName.Substring(rootDirectory.Length - rootDirectory.Substring(rootDirectory.LastIndexOf(Path.DirectorySeparatorChar) + 1).Length);
+                        string pathedResourceFile = new FileInfo(resourceFile).FullName.Substring(options.RootDirectory.Length - options.RootDirectory.Substring(options.RootDirectory.LastIndexOf(Path.DirectorySeparatorChar) + 1).Length);
 
-                        input[pathedResourceFile] = File.ReadAllBytes(Path.Combine(rootDirectory, resourceFile));
+                        input[pathedResourceFile] = File.ReadAllBytes(Path.Combine(options.RootDirectory, resourceFile));
                         rw.AddResourceData(pathedResourceFile, "ResourceTypeCode.ByteArray", input[pathedResourceFile]);
                     }
                 }
@@ -81,12 +82,36 @@ namespace Patcher
                 Console.WriteLine(typeof(AttachedPropertyBrowsableAttribute).Name);
 
                 // Read the source template
-                string templateFileName = @"C:\Users\mullman\Desktop\Patcher\Patcher\Template.cs";
+                string templateFileName = Path.Combine(new FileInfo(typeof(MainWindow).Assembly.Location).DirectoryName, "Template.cs");
 
-                string source = File.ReadAllText(templateFileName);
-                source = source.Replace("public static void CreatePatch()", "[System.STAThread]static void Main(string[] args)");
-                source = source.Replace(" Debug.", " System.Console.");
-                source = source.Replace("private static string targetDirectory = string.Empty; // TEXT: Target directory", string.Format("private static string targetDirectory = @\"{0}\";", targetDirectory));
+                #region Process the file replacements to build valid code
+
+                var originalLines = File.ReadAllLines(templateFileName);
+                StringBuilder total = new StringBuilder();
+                var newLines = new List<string>();
+                for (int i = 0; i < originalLines.Length; i++)
+                {
+                    var line = originalLines[i];
+                    line = line.Replace(" Debug.", " System.Console.");
+                    line = line.Replace("<<PATCH_NOTE_HEADER>>", options.PatchNoteHeader);
+                    line = line.Replace("<<PATCH_NOTE_CONTENT>>", options.PatchNoteContent);
+
+                    if (line.Contains("public static void CreatePatch()"))
+                    {
+                        line = line.Replace("public static void CreatePatch()", "[System.STAThread]static void Main(string[] args)");
+                    }
+                    else if (line.EndsWith("// TEXT: Target directories"))
+                    {
+                        line = string.Format("private static string[] targetDirectories = new string[]{{ {0} }};", string.Join(", ", options.TargetDirectories.Select(x => string.Format("@\"{0}\"", x))));
+                    }
+
+                    // Add the line
+                    newLines.Add(line);
+                }
+
+                string source = string.Join(Environment.NewLine, newLines);
+
+                #endregion
 
                 var provider = CodeDomProvider.CreateProvider("CSharp");
                 var compilerResults = provider.CompileAssemblyFromSource(compilerParameters, source);

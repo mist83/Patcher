@@ -14,13 +14,26 @@ namespace Patcher
     class PatchTemplate
     {
         private static DateTime patchLoadTime;
-        private static bool createPatchBackup = true; // OPTION: Create backups of patched
-        private static string targetDirectory = string.Empty; // TEXT: Target directory
+        private static string[] targetDirectories = null; // TEXT: Target directories
+        private static string targetDirectory;
 
         private static Dictionary<string, byte[]> _Resources = null;
 
+        private static Button runButton = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(4),
+            Padding = new Thickness(4),
+            FontSize = 14,
+            Content = "Apply Patch",
+            IsEnabled = false,
+        };
+
         public static void CreatePatch()
         {
+            targetDirectory = GetTargetDirectory();
+
             Window window = new Window
             {
                 Title = "Patch title", // TEXT: Patch title
@@ -42,7 +55,7 @@ namespace Patcher
                 Header = new TextBlock
                 {
                     FontSize = 14,
-                    Text = "Patch Notes", // TEXT: Patch note header
+                    Text = "<<PATCH_NOTE_HEADER>>",
                     Margin = new Thickness(4)
                 },
 
@@ -51,9 +64,10 @@ namespace Patcher
                     IsReadOnly = true,
                     AcceptsReturn = true,
                     FontSize = 14,
-                    Text = "Patch note content" // TEXT: Patch note content
+                    Text = "<<PATCH_NOTE_CONTENT>>"
                 }
             };
+
             mainGrid.Children.Add(groupBox);
 
             var hyperlinkTextBlock = new TextBlock
@@ -70,17 +84,8 @@ namespace Patcher
             hyperlink.Click += hyperlink_Click;
 
             Grid.SetRow(hyperlinkTextBlock, 1);
-            mainGrid.Children.Add(hyperlinkTextBlock); // OPTION: Enable advanced options
+            mainGrid.Children.Add(hyperlinkTextBlock);
 
-            Button runButton = new Button
-            {
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Bottom,
-                Margin = new Thickness(4),
-                Padding = new Thickness(4),
-                FontSize = 14,
-                Content = "Apply Patch"
-            };
             runButton.Click += runButton_Click;
 
             Grid.SetRow(runButton, 1);
@@ -112,10 +117,10 @@ namespace Patcher
 
             patchLoadTime = DateTime.Now;
 
-            Debug.WriteLine("Output directory: " + targetDirectory);
+            Debug.WriteLine("Output directory: " + targetDirectories);
             foreach (var item in Resources)
             {
-                var target = System.IO.Path.Combine(targetDirectory, item.Key);
+                var target = Path.Combine(targetDirectory, item.Key);
                 var result = MessageBox.Show(target, "OK to Create/Replace?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
                 if (result == MessageBoxResult.Yes)
                 {
@@ -126,6 +131,20 @@ namespace Patcher
                     break;
                 }
             }
+        }
+
+        private static string GetTargetDirectory()
+        {
+            foreach (var targetDirectory in targetDirectories)
+            {
+                if (Directory.Exists(targetDirectory))
+                {
+                    runButton.IsEnabled = true;
+                    return targetDirectory;
+                }
+            }
+
+            return string.Empty;
         }
 
         private static Dictionary<string, byte[]> Resources
@@ -164,7 +183,7 @@ namespace Patcher
         {
             Window window = new Window
             {
-                Title = "Details and Options", // TEXT: Patch title
+                Title = "Details and Options (Advanced)",
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
                 ResizeMode = ResizeMode.CanMinimize,
                 Width = 525,
@@ -205,12 +224,19 @@ namespace Patcher
             targetGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
             targetGrid.ColumnDefinitions.Add(new ColumnDefinition());
 
-            Button targetButton = new Button { FontSize = 14, Content = "Change...", Margin = new Thickness(4) };
-            targetGrid.Children.Add(targetButton);
-
             TextBox targetTextBox = new TextBox { FontSize = 14, IsReadOnly = true, Margin = new Thickness(4), Text = targetDirectory };
             Grid.SetColumn(targetTextBox, 1);
             targetGrid.Children.Add(targetTextBox);
+
+            Button targetButton = new Button
+            {
+                Margin = new Thickness(4),
+                Tag = targetTextBox,
+            };
+            targetButton.Content = new TextBlock { Margin = new Thickness(4), FontSize = 14, Text = "Change...", };
+            targetButton.Click += targetButton_Click;
+
+            targetGrid.Children.Add(targetButton);
 
             destinationGroupBox.Content = targetGrid;
 
@@ -230,16 +256,27 @@ namespace Patcher
             window.ShowDialog();
         }
 
+        static void targetButton_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new System.Windows.Forms.FolderBrowserDialog();
+
+            dialog.ShowDialog();
+            if (!string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                TextBox textBox = (TextBox)((Button)sender).Tag;
+                textBox.Text = dialog.SelectedPath;
+                targetDirectory = dialog.SelectedPath;
+            }
+        }
+
         private static void ReplaceFile(string destination, byte[] content)
         {
             // Remove the original file
             if (File.Exists(destination))
             {
-                if (createPatchBackup)
-                {
-                    string suffix = string.Format(patchLoadTime.ToString(".yyyy_MM_dd__HH_mm_ss") + ".patchbackup");
-                    File.Copy(destination, destination + suffix);
-                }
+                // always create a backup of the file we're overwriting
+                string suffix = string.Format(patchLoadTime.ToString(".yyyy_MM_dd__HH_mm_ss") + ".patchbackup");
+                File.Copy(destination, destination + suffix);
 
                 File.Delete(destination);
             }

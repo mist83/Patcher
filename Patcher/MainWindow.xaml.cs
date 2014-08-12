@@ -2,8 +2,11 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
+using System.Xml.Linq;
 using Microsoft.Win32;
 
 namespace Patcher
@@ -13,10 +16,36 @@ namespace Patcher
     /// </summary>
     public partial class MainWindow : Window
     {
+        private static Brush promptColor = Brushes.WhiteSmoke;
+        private static Brush hoverColor = Brushes.AliceBlue;
+
         public MainWindow()
         {
             InitializeComponent();
-            DataContext = new ViewModel();
+
+            var location = new FileInfo(this.GetType().Assembly.Location);
+            var directory = location.DirectoryName;
+            if (File.Exists(Path.Combine(directory, "PatchSettings.xml")))
+            {
+                try
+                {
+                    XDocument document = XDocument.Load(Path.Combine(directory, "PatchSettings.xml"));
+                    DataContext = new ViewModel(document.Descendants("Notes").Single().Value, document.Descendants("Target").Select(x => x.Value).ToArray());
+                }
+                catch { }
+            }
+
+            if (DataContext == null)
+            {
+                MessageBox.Show("A new settings file has been created that will be used for default values.", "Cannot Load Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                XDocument document = ViewModel.CreateNewSettingsFile(@"C:\Program Files\My Application", @"C:\Program Files (x86)\My Application", @"C:\Program Files\My Application\Sub directory");
+                document.Save("PatchSettings.xml");
+
+                DataContext = new ViewModel(document.Descendants("Notes").Single().Value, document.Descendants("Target").Select(x => x.Value).ToArray());
+            }
+
+            Reset();
         }
 
         private void Grid_Drop(object sender, DragEventArgs e)
@@ -24,7 +53,7 @@ namespace Patcher
             var fileDropList = ((DataObject)e.Data).GetFileDropList();
             if (fileDropList.Count == 0)
             {
-                MessageBox.Show("Can only drop files");
+                MessageBox.Show("You are only allowed to drag/drop files from the file system.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
@@ -58,30 +87,15 @@ namespace Patcher
 
             foreach (string file in fileList.OrderBy(x => x))
             {
-                ((ViewModel)DataContext).Files.Add(file);
-            }
-
-            if (!VM.Validate())
-            {
-                foreach (string file in fileList)
+                if (!VM.Files.Contains(file))
                 {
-                    ((ViewModel)DataContext).Files.Remove(file);
+                    VM.Files.Add(file);
                 }
-
-                string message =
-    @"Cannot create patch from these files.
-Check that:
-
-- All files in the patch descend from the same root.
-- There is at least one file to be patched at the root level.
-- Existing files in this patch (if any) follow these rules.";
-                MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
 
-
-            MySP.Visibility = Visibility.Visible;
-            DashRect.Visibility = Visibility.Collapsed;
             UnHover();
+            MySP.Visibility = Visibility.Visible;
+            FileListStackPanel.Visibility = Visibility.Visible;
         }
 
         private void Grid_DragEnter(object sender, DragEventArgs e)
@@ -91,18 +105,29 @@ Check that:
 
         private void Hover()
         {
-            DashRect.Visibility = Visibility.Visible;
-            DropTextBlock.Foreground = Brushes.AliceBlue;
-            DropTextBlock.Text = "Drop Here";
-            DashRect.Stroke = DropTextBlock.Foreground;
+            HoverGrid.Visibility = Visibility.Visible;
+
+            DropTextBlock.Foreground = hoverColor;
+            DropTextBlock.Text = "Drop Patch Files Here";
+            DashRect.Stroke = hoverColor;
             MySP.Opacity = 0.5;
         }
 
         private void UnHover()
         {
-            DropTextBlock.Text = "Here";
-            DropTextBlock.Foreground = Brushes.LightGray;
-            DashRect.Stroke = Brushes.LightGray;
+            if (VM.Files.Any())
+            {
+                HoverGrid.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                HoverGrid.Visibility = Visibility.Visible;
+
+                DropTextBlock.Text = "Drag Patch Files Here";
+                DropTextBlock.Foreground = promptColor;
+                DashRect.Stroke = promptColor;
+            }
+
             MySP.Opacity = 1;
         }
 
@@ -118,10 +143,11 @@ Check that:
 
         private void Hyperlink_Click(object sender, RoutedEventArgs e)
         {
-
+            var optionsWindow = new PatchOptionsWindow(VM);
+            optionsWindow.ShowDialog();
         }
 
-        private void Button_Click(object sender, RoutedEventArgs e)
+        private void BuildPatch_Click(object sender, RoutedEventArgs e)
         {
             SaveFileDialog dialog = new SaveFileDialog();
             dialog.Title = "Patch Destination";
@@ -130,18 +156,96 @@ Check that:
 
             if (dialog.FileName != string.Empty)
             {
-                try
+                this.IsEnabled = false;
+                Thread t = new Thread(new ParameterizedThreadStart(CreatePatch));
+
+                var patchOptions = new PatchOptions
                 {
-                    Utility.CompileExecutable(dialog.FileName, VM.RootDirectory, VM.TargetDirectory, VM.Files.ToArray());
-                    MessageBox.Show(string.Format("Patch created successfully:{0}{0}{1}.", Environment.NewLine, dialog.FileName), "Success", MessageBoxButton.OK, MessageBoxImage.None);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(string.Format("{0}{1}{1}could not be created. The error message returned was:{1}{1}{2}", dialog.FileName, Environment.NewLine, ex), "Success", MessageBoxButton.OK, MessageBoxImage.None);
-                }
+                    OutputAssembly = dialog.FileName,
+                    RootDirectory = VM.RootDirectory,
+                    PatchNoteContent = VM.Notes,
+                    TargetDirectories = VM.TargetDirectories.ToArray(),
+                    Files = VM.Files.ToArray(),
+                };
+
+                t.Start(patchOptions);
             }
         }
 
+        private void CreatePatch(object parameter)
+        {
+            var patchOptions = (PatchOptions)parameter;
+
+            try
+            {
+                Utility.CompileExecutable(patchOptions);
+
+                Dispatcher.Invoke(() =>
+                {
+                    XDocument document = ViewModel.CreateNewSettingsFile(VM.TargetDirectories.ToArray());
+                    document.Save("PatchSettings.xml");
+                });
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    MessageBox.Show(string.Format("{0}{1}{1}could not be created. The error message returned was:{1}{1}{2}", patchOptions.OutputAssembly, Environment.NewLine, ex), "Success", MessageBoxButton.OK, MessageBoxImage.None);
+                    return;
+                });
+            }
+
+            Dispatcher.Invoke(() =>
+            {
+                MessageBox.Show(string.Format("Patch created successfully:{0}{0}{1}.", Environment.NewLine, patchOptions.OutputAssembly), "Success", MessageBoxButton.OK, MessageBoxImage.None);
+                this.IsEnabled = true;
+            });
+        }
+
         public ViewModel VM { get { return (ViewModel)DataContext; } }
+
+        private void RemoveFile_Click(object sender, RoutedEventArgs e)
+        {
+            string toRemove = Path.Combine(VM.RootDirectory, (string)((MenuItem)sender).Tag);
+            VM.Files.Remove(toRemove);
+
+            if (!VM.Files.Any())
+            {
+                Reset();
+            }
+        }
+
+        private void ClearFiles_Click(object sender, RoutedEventArgs e)
+        {
+            VM.Files.Clear();
+            Reset();
+        }
+
+        private void Reset()
+        {
+            FileListStackPanel.Visibility = Visibility.Collapsed;
+            MySP.Visibility = Visibility.Collapsed;
+            HoverGrid.Visibility = Visibility.Visible;
+        }
+    }
+
+    public class PatchOptions
+    {
+        public PatchOptions()
+        {
+            PatchNoteHeader = "Patch";
+        }
+
+        public string OutputAssembly { get; set; }
+
+        public string RootDirectory { get; set; }
+
+        public string[] TargetDirectories { get; set; }
+
+        public string PatchNoteHeader { get; set; }
+
+        public string PatchNoteContent { get; set; }
+
+        public string[] Files { get; set; }
     }
 }
